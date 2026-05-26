@@ -1,0 +1,7 @@
+tickers:
+  - AAPL          # USA
+  - NVDA          # USA
+  - ASML.AS       # Netherlands (Amsterdam: .AS)
+  - TUPRS.IS      # Turkey (Istanbul: .IS)
+  - BTC-USD       # Crypto
+  - GLD           # Commodity ETF

@@ -7,10 +7,11 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-Timeframe = Literal["daily", "1h"]
+Timeframe = Literal["daily", "1h", "4h"]
 
 MIN_ROWS_DAILY = 60
 MIN_ROWS_HOURLY = 40  # US stocks: 7d × ~6.5h/day ≈ 46 bars; crypto: 7d × 24h = 168
+MIN_ROWS_4H = 20      # US stocks: 60d × ~1.6 bars/day ≈ 96 bars; crypto: 60d × 6 = 360
 VOLUME_HIGH_RATIO = 1.5
 VOLUME_LOW_RATIO = 0.7
 SR_LOOKBACK_DAILY = 20
@@ -27,7 +28,6 @@ class EMAValues(TypedDict):
     ema5: float
     ema20: float
     ema50: float
-    ema200: float | None  # None on 1H (only 7 days of data available)
 
 
 class RSIValues(TypedDict):
@@ -68,6 +68,13 @@ class BreakoutDetection(TypedDict):
     volume_confirmed: bool
 
 
+class StopRunDetection(TypedDict):
+    bullish_stop_run: bool   # Low < support, Close > support
+    bearish_stop_run: bool   # High > resistance, Close < resistance
+    sweep_low: float         # distance swept below support (0.0 if no bullish stop run)
+    sweep_high: float        # distance swept above resistance (0.0 if no bearish stop run)
+
+
 class IndicatorValues(TypedDict):
     ema: EMAValues
     rsi: RSIValues | None       # None on 1H
@@ -76,6 +83,7 @@ class IndicatorValues(TypedDict):
     support_resistance: SRLevels
     volume: VolumeAnalysis
     breakout: BreakoutDetection
+    stop_run: StopRunDetection
     latest_close: float
 
 
@@ -91,6 +99,7 @@ class TickerAnalysis(TypedDict):
 class TAEngineResult(TypedDict):
     daily: dict[str, TickerAnalysis]
     hourly: dict[str, TickerAnalysis]
+    four_hour: dict[str, TickerAnalysis]
 
 
 # ── Indicator calculators ─────────────────────────────────────────────────────
@@ -190,13 +199,49 @@ def detect_breakout(
     )
 
 
+def detect_stop_run(
+    df: pd.DataFrame,
+    support: float,
+    resistance: float,
+) -> StopRunDetection:
+    """Detect stop run reversals: price sweeps a level then closes back through it."""
+    latest = df.iloc[-1]
+    low = float(latest["Low"])
+    high = float(latest["High"])
+    close = float(latest["Close"])
+
+    bullish = low < support and close > support   # swept lows, reversed up
+    bearish = high > resistance and close < resistance  # swept highs, reversed down
+
+    return StopRunDetection(
+        bullish_stop_run=bullish,
+        bearish_stop_run=bearish,
+        sweep_low=support - low if bullish else 0.0,
+        sweep_high=high - resistance if bearish else 0.0,
+    )
+
+
 # ── Signal evaluators ─────────────────────────────────────────────────────────
+
+
+def evaluate_stop_run_signals(stop_run: StopRunDetection) -> list[str]:
+    """Return a signal string only when a stop run is actually detected."""
+    if stop_run["bullish_stop_run"]:
+        return [
+            f"✅ Bullish Stop Run: Swept {stop_run['sweep_low']:.2f} below support, "
+            f"closed above → Reversal signal"
+        ]
+    if stop_run["bearish_stop_run"]:
+        return [
+            f"❌ Bearish Stop Run: Swept {stop_run['sweep_high']:.2f} above resistance, "
+            f"closed below → Rejection signal"
+        ]
+    return []
 
 
 def evaluate_ema_signals(
     ema: EMAValues,
     latest_close: float,
-    timeframe: Timeframe,
 ) -> list[str]:
     signals: list[str] = []
 
@@ -206,15 +251,9 @@ def evaluate_ema_signals(
         signals.append("❌ EMA5 < EMA20 = Momentum fading")
 
     if ema["ema20"] > ema["ema50"]:
-        signals.append("✅ EMA20 > EMA50 = Uptrend starting")
+        signals.append("✅ EMA20 > EMA50 = Strong uptrend")
     else:
-        signals.append("❌ EMA20 < EMA50 = Downtrend forming")
-
-    if timeframe == "daily" and ema["ema200"] is not None:
-        if ema["ema50"] > ema["ema200"]:
-            signals.append("✅ EMA50 > EMA200 = Strong uptrend")
-        else:
-            signals.append("❌ EMA50 < EMA200 = Strong downtrend")
+        signals.append("❌ EMA20 < EMA50 = Strong downtrend")
 
     if latest_close > ema["ema20"]:
         signals.append("✅ Price above EMA20 = Buyers in control")
@@ -317,7 +356,12 @@ def analyze_ticker(
     df: pd.DataFrame,
     timeframe: Timeframe,
 ) -> TickerAnalysis:
-    min_rows = MIN_ROWS_DAILY if timeframe == "daily" else MIN_ROWS_HOURLY
+    if timeframe == "daily":
+        min_rows = MIN_ROWS_DAILY
+    elif timeframe == "4h":
+        min_rows = MIN_ROWS_4H
+    else:
+        min_rows = MIN_ROWS_HOURLY
     if len(df) < min_rows:
         return TickerAnalysis(
             ticker=ticker,
@@ -332,31 +376,23 @@ def analyze_ticker(
     latest_close = float(df["Close"].iloc[-1])
     sr_lookback = SR_LOOKBACK_DAILY if timeframe == "daily" else SR_LOOKBACK_HOURLY
 
-    # EMA
     ema_values: EMAValues | None = None
     try:
         e5 = calculate_ema(df["Close"], 5)
         e20 = calculate_ema(df["Close"], 20)
         e50 = calculate_ema(df["Close"], 50)
-        ema200_val: float | None = None
-        if timeframe == "daily":
-            e200 = calculate_ema(df["Close"], 200)
-            last200 = e200.dropna()
-            if not last200.empty:
-                ema200_val = float(last200.iloc[-1])
         ema_values = EMAValues(
             ema5=float(e5.iloc[-1]),
             ema20=float(e20.iloc[-1]),
             ema50=float(e50.iloc[-1]),
-            ema200=ema200_val,
         )
-        signals.extend(evaluate_ema_signals(ema_values, latest_close, timeframe))
+        signals.extend(evaluate_ema_signals(ema_values, latest_close))
     except Exception as exc:
         logger.warning("EMA calculation failed for %s: %s", ticker, exc)
 
-    # RSI (daily only)
+    # RSI (daily and 4h)
     rsi_values: RSIValues | None = None
-    if timeframe == "daily":
+    if timeframe in ("daily", "4h"):
         try:
             rsi_series = calculate_rsi(df["Close"])
             rsi_values = RSIValues(
@@ -367,9 +403,9 @@ def analyze_ticker(
         except Exception as exc:
             logger.warning("RSI calculation failed for %s: %s", ticker, exc)
 
-    # ATR (daily only)
+    # ATR (daily and 4h)
     atr_values: ATRValues | None = None
-    if timeframe == "daily":
+    if timeframe in ("daily", "4h"):
         try:
             atr_series = calculate_atr(df)
             atr_values = ATRValues(
@@ -403,9 +439,10 @@ def analyze_ticker(
     except Exception as exc:
         logger.warning("Volume calculation failed for %s: %s", ticker, exc)
 
-    # Support / Resistance + Breakout
+    # Support / Resistance + Breakout + Stop Run
     sr_values: SRLevels | None = None
     breakout_values: BreakoutDetection | None = None
+    stop_run_values: StopRunDetection | None = None
     try:
         support, resistance = calculate_support_resistance(df, sr_lookback)
         price_vs_support_pct = (latest_close - support) / support * 100 if support > 0 else 0.0
@@ -419,12 +456,14 @@ def analyze_ticker(
         vol_ratio = vol_values["volume_ratio"] if vol_values else 1.0
         breakout_values = detect_breakout(df, resistance, support, vol_ratio)
         signals.extend(evaluate_sr_signals(sr_values, breakout_values))
+        stop_run_values = detect_stop_run(df, support, resistance)
+        signals.extend(evaluate_stop_run_signals(stop_run_values))
     except Exception as exc:
         logger.warning("S/R calculation failed for %s: %s", ticker, exc)
 
     # Fallback defaults for failed indicators
     if ema_values is None:
-        ema_values = EMAValues(ema5=0.0, ema20=0.0, ema50=0.0, ema200=None)
+        ema_values = EMAValues(ema5=0.0, ema20=0.0, ema50=0.0)
     if bb_values is None:
         bb_values = BollingerValues(upper=0.0, middle=0.0, lower=0.0, bandwidth=0.0, prev_bandwidth=0.0)
     if vol_values is None:
@@ -433,6 +472,8 @@ def analyze_ticker(
         sr_values = SRLevels(nearest_support=0.0, nearest_resistance=0.0, price_vs_support_pct=0.0, price_vs_resistance_pct=0.0)
     if breakout_values is None:
         breakout_values = BreakoutDetection(is_breakout=False, breakout_type="none", volume_confirmed=False)
+    if stop_run_values is None:
+        stop_run_values = StopRunDetection(bullish_stop_run=False, bearish_stop_run=False, sweep_low=0.0, sweep_high=0.0)
 
     indicators = IndicatorValues(
         ema=ema_values,
@@ -442,6 +483,7 @@ def analyze_ticker(
         support_resistance=sr_values,
         volume=vol_values,
         breakout=breakout_values,
+        stop_run=stop_run_values,
         latest_close=latest_close,
     )
 
@@ -461,13 +503,14 @@ def analyze_ticker(
 def run_ta_engine(
     daily_data: dict[str, pd.DataFrame],
     hourly_data: dict[str, pd.DataFrame],
+    four_hour_data: dict[str, pd.DataFrame] | None = None,
 ) -> TAEngineResult:
-    """Run full TA pipeline for all tickers on both timeframes.
+    """Run full TA pipeline for all tickers on daily, 1H, and 4H timeframes.
 
-    hourly_data may be an empty dict for daily-only runs.
+    hourly_data and four_hour_data may be empty dicts or None for partial runs.
     Each ticker failure is logged and excluded; remaining tickers proceed.
     """
-    result: TAEngineResult = {"daily": {}, "hourly": {}}
+    result: TAEngineResult = {"daily": {}, "hourly": {}, "four_hour": {}}
 
     for ticker, df in daily_data.items():
         try:
@@ -481,6 +524,12 @@ def run_ta_engine(
         except Exception as exc:
             logger.error("TA analysis failed for %s (1h): %s", ticker, exc)
 
+    for ticker, df in (four_hour_data or {}).items():
+        try:
+            result["four_hour"][ticker] = analyze_ticker(ticker, df, "4h")
+        except Exception as exc:
+            logger.error("TA analysis failed for %s (4h): %s", ticker, exc)
+
     return result
 
 
@@ -488,8 +537,9 @@ def run_ta_engine(
 
 if __name__ == "__main__":
     import sys
+    from pathlib import Path
 
-    sys.path.insert(0, "/Users/Elifcik/Desktop/apps/Stock-limit-briefing/src")
+    sys.path.insert(0, str(Path(__file__).parent))
     from data_fetcher import fetch_hourly_data, fetch_ticker_data
 
     logging.basicConfig(
