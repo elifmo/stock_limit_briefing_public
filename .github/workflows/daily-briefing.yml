@@ -1,8 +1,6 @@
 on:
   schedule:
-    # Morning: 12:00 Turkey (UTC+3) = 09:00 UTC
     - cron: "0 9 * * *"
-    # Evening: 19:35 Turkey (UTC+3) = 16:35 UTC
     - cron: "35 16 * * *"
   workflow_dispatch:
     inputs:
