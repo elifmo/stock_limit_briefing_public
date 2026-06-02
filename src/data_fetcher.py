@@ -42,6 +42,18 @@ def fetch_4h_data(tickers: list[str]) -> dict[str, pd.DataFrame]:
     return _fetch_ohlcv(tickers, period="60d", interval="4h")
 
 
+def fetch_live_prices(tickers: list[str]) -> dict[str, float | None]:
+    """Fetch current live price for each ticker via yfinance fast_info."""
+    result: dict[str, float | None] = {}
+    for ticker in tickers:
+        try:
+            result[ticker] = float(yf.Ticker(ticker).fast_info.last_price)
+        except Exception as exc:
+            logger.warning("Live price unavailable for %s: %s", ticker, exc)
+            result[ticker] = None
+    return result
+
+
 def get_latest_price(df: pd.DataFrame) -> float:
     """Return the most recent closing price."""
     return float(df["Close"].iloc[-1])

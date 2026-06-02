@@ -1,7 +1,7 @@
 on:
   schedule:
-    - cron: "0 9 * * *"
-    - cron: "35 16 * * *"
+    - cron: "15 8 * * *"
+    - cron: "15 15 * * *"
   workflow_dispatch:
     inputs:
       mail_type:
@@ -36,7 +36,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "type=${{ github.event.inputs.mail_type }}" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event.schedule }}" = "0 9 * * *" ]; then
+          elif [ "${{ github.event.schedule }}" = "15 8 * * *" ]; then
             echo "type=morning" >> $GITHUB_OUTPUT
           else
             echo "type=evening" >> $GITHUB_OUTPUT

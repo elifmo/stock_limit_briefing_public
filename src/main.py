@@ -12,7 +12,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 sys.path.insert(0, str(Path(__file__).parent))
 
 from ai_synthesizer import run_synthesizer
-from data_fetcher import fetch_4h_data, fetch_hourly_data, fetch_ticker_data
+from data_fetcher import fetch_4h_data, fetch_hourly_data, fetch_live_prices, fetch_ticker_data
 from mail_sender import send_briefing
 from state_classifier import classify_all_tickers
 from ta_engine import run_ta_engine
@@ -54,6 +54,8 @@ def run(mail_type: MailType) -> None:
     daily_data = fetch_ticker_data(tickers)
     hourly_data = fetch_hourly_data(tickers)
     four_hour_data = fetch_4h_data(tickers)
+    live_prices = fetch_live_prices(tickers)
+    logger.info("Live prices: %s", {k: f"{v:.2f}" if v else None for k, v in live_prices.items()})
 
     logger.info("Running TA engine...")
     ta_result = run_ta_engine(daily_data, hourly_data, four_hour_data)
@@ -72,7 +74,7 @@ def run(mail_type: MailType) -> None:
     classifications = classify_all_tickers(all_analysis)
 
     logger.info("Synthesizing briefing...")
-    report_path = run_synthesizer(ta_result, classifications, mail_type)
+    report_path = run_synthesizer(ta_result, classifications, mail_type, live_prices)
 
     logger.info("Sending email...")
     send_briefing(report_path)

@@ -169,10 +169,16 @@ def _parse_sections(text: str) -> tuple[str, str]:
 _MARKET_ORDER = ["TR", "NL", "USA", "CRYPTO"]
 
 _MARKET_HEADERS: dict[str, dict[str, str]] = {
-    "TR":     {"morning": "🇹🇷 TÜRKİYE (Açılış + 1 saat)",       "evening": "🇹🇷 TÜRKİYE (Kapanış)"},
-    "NL":     {"morning": "🇳🇱 HOLLANDA (Açılış + 1 saat)",       "evening": "🇳🇱 HOLLANDA (Kapanış)"},
-    "USA":    {"morning": "🇺🇸 USA (Önceki günün kapanışı)",       "evening": "🇺🇸 USA (Açılış + 1 saat)"},
-    "CRYPTO": {"morning": "🪙 KRİPTO (Günlük kapanış)",            "evening": "🪙 KRİPTO (Önceki günün kapanışı)"},
+    "TR":     {"morning": "🇹🇷 TURKEY (Live — Open +1h)",       "evening": "🇹🇷 TURKEY (Close)"},
+    "NL":     {"morning": "🇳🇱 NETHERLANDS (Live — Open +1h)",  "evening": "🇳🇱 NETHERLANDS (Close)"},
+    "USA":    {"morning": "🇺🇸 USA (Previous Close)",            "evening": "🇺🇸 USA (Live — Open +1h)"},
+    "CRYPTO": {"morning": "🪙 CRYPTO (Live)",                    "evening": "🪙 CRYPTO (Live)"},
+}
+
+# Markets showing live prices at each mail time
+_LIVE_MARKETS: dict[str, set[str]] = {
+    "morning": {"TR", "NL", "CRYPTO"},
+    "evening": {"USA", "CRYPTO"},
 }
 
 
@@ -186,11 +192,21 @@ def _detect_market(ticker: str) -> str:
     return "USA"
 
 
+def _currency(ticker: str) -> str:
+    if ticker.endswith(".IS"):
+        return "₺"
+    if ticker.endswith(".AS"):
+        return "€"
+    return "$"
+
+
 def _group_by_market(classifications: dict) -> dict[str, list[str]]:
     groups: dict[str, list[str]] = {m: [] for m in _MARKET_ORDER}
     for ticker in classifications:
         market = _detect_market(ticker)
         groups.setdefault(market, []).append(ticker)
+    for market in groups:
+        groups[market].sort()
     return groups
 
 
@@ -202,6 +218,8 @@ def build_ticker_section(
     classification: dict,
     ta_result: dict,
     client: anthropic.Anthropic,
+    mail_type: MailType,
+    live_prices: dict[str, float | None],
 ) -> str:
     state = classification["state"]
     confidence = classification["confidence"]
@@ -214,10 +232,24 @@ def build_ticker_section(
     hourly_ta = ta_result["hourly"].get(ticker)
     four_hour_ta = ta_result.get("four_hour", {}).get(ticker)
 
+    market = _detect_market(ticker)
+    cur = _currency(ticker)
+    is_live = market in _LIVE_MARKETS[mail_type]
+    live_price = live_prices.get(ticker) if is_live else None
+
+    if live_price is not None:
+        price_line = f"💰 Live: {cur}{live_price:.2f}"
+    elif daily_ta and daily_ta.get("indicators"):
+        price_line = f"💰 Close: {cur}{daily_ta['indicators']['latest_close']:.2f}"
+    else:
+        price_line = None
+
     lines: list[str] = [
         f"{ticker} — {icon} {state}  ({confidence} confidence)",
-        "",
     ]
+    if price_line:
+        lines.append(price_line)
+    lines.append("")
 
     if hourly_ta and hourly_ta.get("signals"):
         lines.append("📊 SHORT-TERM (1H):")
@@ -288,8 +320,8 @@ def _next_briefing(mail_type: MailType) -> str:
 
 def _time_label(mail_type: MailType) -> str:
     if mail_type == "morning":
-        return "Morning (12:00 Turkey)"
-    return "Evening (19:35 Turkey)"
+        return "Morning (11:15 Turkey)"
+    return "Evening (18:15 Turkey)"
 
 
 def build_email_body(
@@ -297,6 +329,7 @@ def build_email_body(
     ta_result: dict,
     mail_type: MailType,
     client: anthropic.Anthropic,
+    live_prices: dict[str, float | None],
 ) -> str:
     today = date.today().strftime("%B %d, %Y")
     label = _mail_label(mail_type)
@@ -327,7 +360,7 @@ def build_email_body(
                 continue
             try:
                 lines.append("")
-                lines.append(build_ticker_section(ticker, classification, ta_result, client))
+                lines.append(build_ticker_section(ticker, classification, ta_result, client, mail_type, live_prices))
                 lines.append("")
                 lines.append(_SEP_THIN)
             except Exception as exc:
@@ -359,8 +392,8 @@ def run_synthesizer(
     ta_result: dict,
     classifications: dict[str, dict],
     mail_type: MailType,
+    live_prices: dict[str, float | None] | None = None,
 ) -> Path:
-    api_key_missing = False
     try:
         client = anthropic.Anthropic()
     except Exception:
@@ -371,7 +404,7 @@ def run_synthesizer(
             sys.exit(1)
         client = anthropic.Anthropic(api_key=key)
 
-    body = build_email_body(classifications, ta_result, mail_type, client)
+    body = build_email_body(classifications, ta_result, mail_type, client, live_prices or {})
     path = save_briefing(body, mail_type)
     logger.info("Briefing saved: %s", path)
     return path
