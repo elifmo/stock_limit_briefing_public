@@ -1,8 +1,9 @@
 import logging
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import anthropic
 
@@ -319,9 +320,10 @@ def _next_briefing(mail_type: MailType) -> str:
 
 
 def _time_label(mail_type: MailType) -> str:
+    is_summer = bool(datetime.now(ZoneInfo("Europe/Amsterdam")).dst())
     if mail_type == "morning":
-        return "Morning (11:15 Turkey)"
-    return "Evening (18:15 Turkey)"
+        return f"Morning ({'11:00' if is_summer else '12:00'} Turkey)"
+    return f"Evening ({'18:45' if is_summer else '19:45'} Turkey)"
 
 
 def build_email_body(
