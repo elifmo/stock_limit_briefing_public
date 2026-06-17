@@ -1,9 +1,4 @@
 on:
-  schedule:
-    - cron: "0 8 * * *"   # Summer morning  → 08:00 UTC = 11:00 Turkey (NL CEST+1h = 08:00 UTC)
-    - cron: "0 9 * * *"   # Winter morning  → 09:00 UTC = 12:00 Turkey (NL CET+1h  = 09:00 UTC)
-    - cron: "45 15 * * *" # Summer evening  → 15:45 UTC = 18:45 Turkey (NL 17:30 CEST close + 15m)
-    - cron: "45 16 * * *" # Winter evening  → 16:45 UTC = 19:45 Turkey (NL 17:30 CET close  + 15m)
   workflow_dispatch:
     inputs:
       mail_type:
@@ -18,67 +13,29 @@ jobs:
   send-briefing:
     runs-on: ubuntu-latest
     steps:
-      - name: Check season and skip wrong trigger
-        id: season_check
-        if: github.event_name == 'schedule'
-        run: |
-          # Amsterdam is UTC+2 (CEST) in summer, UTC+1 (CET) in winter
-          AMSTERDAM_OFFSET=$(TZ=Europe/Amsterdam date +%z)
-          SCHEDULE="${{ github.event.schedule }}"
-          SKIP=false
-
-          if [ "$AMSTERDAM_OFFSET" = "+0200" ]; then
-            # Summer: only summer crons should run
-            [ "$SCHEDULE" = "0 9 * * *" ]   && SKIP=true
-            [ "$SCHEDULE" = "45 16 * * *" ] && SKIP=true
-          else
-            # Winter: only winter crons should run
-            [ "$SCHEDULE" = "0 8 * * *" ]   && SKIP=true
-            [ "$SCHEDULE" = "45 15 * * *" ] && SKIP=true
-          fi
-
-          echo "skip=$SKIP" >> $GITHUB_OUTPUT
-
       - name: Checkout
-        if: steps.season_check.outputs.skip != 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
-        if: steps.season_check.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
       - name: Install dependencies
-        if: steps.season_check.outputs.skip != 'true'
         run: pip install -r requirements.txt
 
       - name: Create tickers config
-        if: steps.season_check.outputs.skip != 'true'
         run: |
           mkdir -p config
           cat > config/tickers.yaml << 'EOF'
           ${{ secrets.TICKERS_YAML }}
           EOF
 
-      - name: Determine mail type
-        id: mail_type
-        if: steps.season_check.outputs.skip != 'true'
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "type=${{ github.event.inputs.mail_type }}" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.event.schedule }}" == "0 8 * * *" || "${{ github.event.schedule }}" == "0 9 * * *" ]]; then
-            echo "type=morning" >> $GITHUB_OUTPUT
-          else
-            echo "type=evening" >> $GITHUB_OUTPUT
-          fi
-
       - name: Run briefing
-        if: steps.season_check.outputs.skip != 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
-        run: python src/main.py ${{ steps.mail_type.outputs.type }}
+        run: python src/main.py ${{ github.event.inputs.mail_type }}
