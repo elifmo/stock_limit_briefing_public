@@ -21,6 +21,22 @@ BB_PERIOD = 20
 RSI_PERIOD = 14
 ATR_PERIOD = 14
 
+# SRP constants
+SRP_SR_LOOKBACK = 34
+SRP_TARGET_ATR_MULT = 1.35
+SRP_INVALIDATION_ATR_MULT = 0.18
+SRP_READINESS_THRESHOLD_LOW = 66
+SRP_READINESS_THRESHOLD_HIGH = 78
+
+# PAP constants
+PAP_LOOKBACK = 320
+PAP_ROWS = 26
+PAP_VALUE_AREA_PCT = 0.70
+PAP_SCORE_THRESHOLD = 66
+PAP_RECENT_BARS = 20
+PAP_REVISIT_ATR_MULT = 0.5
+PAP_EDGE_ATR_MULT = 0.5
+
 # ── Type definitions ──────────────────────────────────────────────────────────
 
 
@@ -75,6 +91,33 @@ class StopRunDetection(TypedDict):
     sweep_high: float        # distance swept above resistance (0.0 if no bearish stop run)
 
 
+class SRPResult(TypedDict):
+    detected: bool
+    direction: Literal["bullish", "bearish", "none"]
+    sweep_amount: float
+    support: float
+    resistance: float
+    sweep_score: float
+    confirmation_score: float
+    volume_score: float
+    reversal_readiness_score: float
+    action: Literal["Stand Aside", "Wait Confirm", "Plan Pullback", "Review Reversal"]
+    target: float
+    invalidation: float
+
+
+class PAPResult(TypedDict):
+    poc: float
+    vah: float
+    val: float
+    poc1: float
+    poc2: float
+    rotation: Literal["up", "down", "stable"]
+    acceptance_score: float
+    price_location: Literal["inside_balance", "edge_review", "above_balance", "below_balance"]
+    action: Literal["WAIT PROFILE", "ACCEPTANCE READY", "ACCEPTED UP", "ACCEPTED DOWN", "EDGE REVIEW", "REJECTION REVIEW"]
+
+
 class IndicatorValues(TypedDict):
     ema: EMAValues
     rsi: RSIValues | None       # None on 1H
@@ -85,6 +128,8 @@ class IndicatorValues(TypedDict):
     breakout: BreakoutDetection
     stop_run: StopRunDetection
     latest_close: float
+    srp: SRPResult | None       # 4H only
+    pap: PAPResult | None       # daily only
 
 
 class TickerAnalysis(TypedDict):
@@ -218,6 +263,231 @@ def detect_stop_run(
         bearish_stop_run=bearish,
         sweep_low=support - low if bullish else 0.0,
         sweep_high=high - resistance if bearish else 0.0,
+    )
+
+
+# ── SRP & PAP calculators ─────────────────────────────────────────────────────
+
+
+def _compute_poc(
+    window: pd.DataFrame,
+    min_price: float,
+    max_price: float,
+    n_rows: int,
+) -> float:
+    if min_price >= max_price or len(window) == 0:
+        return (min_price + max_price) / 2
+    row_size = (max_price - min_price) / n_rows
+    rows = [min_price + i * row_size for i in range(n_rows)]
+    touch_counts = [
+        int(((window["Low"] <= level + row_size) & (window["High"] >= level)).sum())
+        for level in rows
+    ]
+    return rows[touch_counts.index(max(touch_counts))]
+
+
+def calculate_srp(
+    df: pd.DataFrame,
+    atr: float,
+    ema5: float,
+    ema20: float,
+    volume_ratio: float,
+) -> SRPResult:
+    support, resistance = calculate_support_resistance(df, SRP_SR_LOOKBACK)
+    latest = df.iloc[-1]
+    low = float(latest["Low"])
+    high = float(latest["High"])
+    close = float(latest["Close"])
+    open_ = float(latest["Open"])
+    bar_range = high - low or atr  # guard against doji
+
+    bullish = low < support and close > support
+    bearish = high > resistance and close < resistance
+
+    _no_signal = SRPResult(
+        detected=False, direction="none", sweep_amount=0.0,
+        support=support, resistance=resistance,
+        sweep_score=0.0, confirmation_score=0.0, volume_score=0.0,
+        reversal_readiness_score=0.0, action="Stand Aside",
+        target=0.0, invalidation=0.0,
+    )
+
+    if not bullish and not bearish:
+        return _no_signal
+
+    direction: Literal["bullish", "bearish"] = "bullish" if bullish else "bearish"
+    volume_score = min(100.0, volume_ratio * 100)
+
+    if bullish:
+        lower_wick = close - low
+        wick_score = min(100.0, lower_wick / bar_range * 100)
+        penetration_score = min(100.0, (support - low) / atr * 100)
+        sweep_score = 0.56 * wick_score + 0.34 * penetration_score + 0.10 * volume_score
+
+        dir_body = 100.0 if close > open_ else 0.0
+        body_share = abs(close - open_) / bar_range * 100
+        close_location = (close - low) / bar_range * 100
+        close_following = min(100.0, (close - support) / atr * 100)
+
+        target = min(resistance, close + SRP_TARGET_ATR_MULT * atr) if resistance > close else close + SRP_TARGET_ATR_MULT * atr
+        invalidation = low - SRP_INVALIDATION_ATR_MULT * atr
+        sweep_amount = support - low
+    else:
+        upper_wick = high - close
+        wick_score = min(100.0, upper_wick / bar_range * 100)
+        penetration_score = min(100.0, (high - resistance) / atr * 100)
+        sweep_score = 0.56 * wick_score + 0.34 * penetration_score + 0.10 * volume_score
+
+        dir_body = 100.0 if close < open_ else 0.0
+        body_share = abs(close - open_) / bar_range * 100
+        close_location = (high - close) / bar_range * 100
+        close_following = min(100.0, (resistance - close) / atr * 100)
+
+        target = max(support, close - SRP_TARGET_ATR_MULT * atr) if support < close else close - SRP_TARGET_ATR_MULT * atr
+        invalidation = high + SRP_INVALIDATION_ATR_MULT * atr
+        sweep_amount = high - resistance
+
+    confirmation_score = (0.22 * dir_body + 0.38 * body_share
+                          + 0.12 * close_location + 0.28 * close_following)
+
+    if bullish:
+        target_room = min(100.0, (target - close) / (SRP_TARGET_ATR_MULT * atr) * 100) if atr > 0 else 0.0
+        trend_turn = 100.0 if ema5 > ema20 else 0.0
+    else:
+        target_room = min(100.0, (close - target) / (SRP_TARGET_ATR_MULT * atr) * 100) if atr > 0 else 0.0
+        trend_turn = 100.0 if ema5 < ema20 else 0.0
+
+    readiness = (0.22 * sweep_score + 0.44 * confirmation_score
+                 + 0.12 * volume_score + 0.14 * target_room + 0.08 * trend_turn)
+
+    if readiness < SRP_READINESS_THRESHOLD_LOW:
+        action: Literal["Stand Aside", "Wait Confirm", "Plan Pullback", "Review Reversal"] = "Wait Confirm"
+    elif readiness < SRP_READINESS_THRESHOLD_HIGH:
+        action = "Plan Pullback"
+    else:
+        action = "Review Reversal"
+
+    return SRPResult(
+        detected=True,
+        direction=direction,
+        sweep_amount=sweep_amount,
+        support=support,
+        resistance=resistance,
+        sweep_score=sweep_score,
+        confirmation_score=confirmation_score,
+        volume_score=volume_score,
+        reversal_readiness_score=readiness,
+        action=action,
+        target=target,
+        invalidation=invalidation,
+    )
+
+
+def calculate_pap(
+    df: pd.DataFrame,
+    atr: float,
+) -> PAPResult:
+    lookback = min(PAP_LOOKBACK, len(df))
+    window = df.iloc[-lookback:]
+    min_price = float(window["Low"].min())
+    max_price = float(window["High"].max())
+    close = float(df["Close"].iloc[-1])
+
+    if min_price >= max_price:
+        mid = (min_price + max_price) / 2
+        return PAPResult(
+            poc=mid, vah=max_price, val=min_price, poc1=mid, poc2=mid,
+            rotation="stable", acceptance_score=0.0,
+            price_location="inside_balance", action="WAIT PROFILE",
+        )
+
+    row_size = (max_price - min_price) / PAP_ROWS
+    rows = [min_price + i * row_size for i in range(PAP_ROWS)]
+    touch_counts = [
+        int(((window["Low"] <= level + row_size) & (window["High"] >= level)).sum())
+        for level in rows
+    ]
+    total_touches = sum(touch_counts)
+    poc_idx = touch_counts.index(max(touch_counts))
+    poc = rows[poc_idx]
+
+    # Value area: symmetric expansion from POC until 70% covered
+    vah_idx = poc_idx
+    val_idx = poc_idx
+    accumulated = touch_counts[poc_idx]
+    target_touches = PAP_VALUE_AREA_PCT * total_touches
+
+    while accumulated < target_touches:
+        above = touch_counts[vah_idx + 1] if vah_idx + 1 < PAP_ROWS else 0
+        below = touch_counts[val_idx - 1] if val_idx - 1 >= 0 else 0
+        if above == 0 and below == 0:
+            break
+        if above >= below and vah_idx + 1 < PAP_ROWS:
+            vah_idx += 1
+            accumulated += above
+        elif val_idx - 1 >= 0:
+            val_idx -= 1
+            accumulated += below
+        else:
+            vah_idx += 1
+            accumulated += above
+
+    vah = rows[vah_idx] + row_size
+    val = rows[val_idx]
+
+    # Rotation: compare first-half vs second-half POC
+    half = lookback // 2
+    poc1 = _compute_poc(df.iloc[-lookback:-half], min_price, max_price, PAP_ROWS)
+    poc2 = _compute_poc(df.iloc[-half:], min_price, max_price, PAP_ROWS)
+    if poc2 > poc1:
+        rotation: Literal["up", "down", "stable"] = "up"
+    elif poc2 < poc1:
+        rotation = "down"
+    else:
+        rotation = "stable"
+
+    # Acceptance score
+    recent = df.iloc[-PAP_RECENT_BARS:]
+    acceptance_strength = float(((recent["Close"] >= val) & (recent["Close"] <= vah)).sum()) / PAP_RECENT_BARS * 100
+    revisit_mask = window["Close"].between(poc - PAP_REVISIT_ATR_MULT * atr, poc + PAP_REVISIT_ATR_MULT * atr)
+    revisit_density = float(revisit_mask.sum()) / lookback * 100
+    total_range = max_price - min_price
+    zone_range = vah - val
+    zone_separation = min(100.0, zone_range / total_range * 100) if total_range > 0 else 0.0
+    width_health = min(100.0, zone_range / (2 * atr) * 100) if atr > 0 else 0.0
+    acceptance_score = (0.50 * acceptance_strength + 0.20 * revisit_density
+                        + 0.20 * zone_separation + 0.10 * width_health)
+
+    # Price location
+    at_edge = (abs(close - vah) < PAP_EDGE_ATR_MULT * atr or
+               abs(close - val) < PAP_EDGE_ATR_MULT * atr)
+    if val <= close <= vah:
+        price_location: Literal["inside_balance", "edge_review", "above_balance", "below_balance"] = (
+            "edge_review" if at_edge else "inside_balance"
+        )
+    elif close > vah:
+        price_location = "above_balance"
+    else:
+        price_location = "below_balance"
+
+    # Action state
+    if acceptance_score < PAP_SCORE_THRESHOLD:
+        action_pap: Literal["WAIT PROFILE", "ACCEPTANCE READY", "ACCEPTED UP", "ACCEPTED DOWN", "EDGE REVIEW", "REJECTION REVIEW"] = "WAIT PROFILE"
+    elif price_location == "inside_balance" and rotation == "up":
+        action_pap = "ACCEPTED UP"
+    elif price_location == "inside_balance" and rotation == "down":
+        action_pap = "ACCEPTED DOWN"
+    elif price_location == "inside_balance":
+        action_pap = "ACCEPTANCE READY"
+    elif price_location == "edge_review":
+        action_pap = "EDGE REVIEW"
+    else:
+        action_pap = "REJECTION REVIEW"
+
+    return PAPResult(
+        poc=poc, vah=vah, val=val, poc1=poc1, poc2=poc2,
+        rotation=rotation, acceptance_score=acceptance_score,
+        price_location=price_location, action=action_pap,
     )
 
 
@@ -461,6 +731,28 @@ def analyze_ticker(
     except Exception as exc:
         logger.warning("S/R calculation failed for %s: %s", ticker, exc)
 
+    # SRP (4H only)
+    srp_values: SRPResult | None = None
+    if timeframe == "4h" and atr_values is not None and ema_values is not None and vol_values is not None:
+        try:
+            srp_values = calculate_srp(
+                df,
+                atr=atr_values["value"],
+                ema5=ema_values["ema5"],
+                ema20=ema_values["ema20"],
+                volume_ratio=vol_values["volume_ratio"],
+            )
+        except Exception as exc:
+            logger.warning("SRP calculation failed for %s: %s", ticker, exc)
+
+    # PAP (daily only)
+    pap_values: PAPResult | None = None
+    if timeframe == "daily" and atr_values is not None:
+        try:
+            pap_values = calculate_pap(df, atr=atr_values["value"])
+        except Exception as exc:
+            logger.warning("PAP calculation failed for %s: %s", ticker, exc)
+
     # Fallback defaults for failed indicators
     if ema_values is None:
         ema_values = EMAValues(ema5=0.0, ema20=0.0, ema50=0.0)
@@ -485,6 +777,8 @@ def analyze_ticker(
         breakout=breakout_values,
         stop_run=stop_run_values,
         latest_close=latest_close,
+        srp=srp_values,
+        pap=pap_values,
     )
 
     return TickerAnalysis(
