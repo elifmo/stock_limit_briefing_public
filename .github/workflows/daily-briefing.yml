@@ -28,11 +28,16 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Create tickers config
+        env:
+          TICKERS_YAML: ${{ secrets.TICKERS_YAML }}
         run: |
           mkdir -p config
-          cat > config/tickers.yaml << 'EOF'
-          ${{ secrets.TICKERS_YAML }}
-          EOF
+          if [ -z "$TICKERS_YAML" ]; then
+            echo "ERROR: TICKERS_YAML secret is missing."
+            exit 1
+          fi
+          printf '%s\n' "$TICKERS_YAML" > config/tickers.yaml
+          python -c "import yaml; d=yaml.safe_load(open('config/tickers.yaml')); assert d.get('tickers'), 'tickers list is empty'"
 
       - name: Restore state history
         uses: actions/cache/restore@v4
@@ -53,8 +58,8 @@ jobs:
         run: python src/main.py ${{ github.event.inputs.mail_type }}
 
       - name: Save state history
+        if: success()
         uses: actions/cache/save@v4
-        if: always()
         with:
           path: |
             reports/snapshot_history.json
