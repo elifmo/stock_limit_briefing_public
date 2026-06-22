@@ -41,23 +41,31 @@ def today_for_portfolio(portfolio: Portfolio) -> date:
     return today_turkey()
 
 
-def _is_trading_day(d: date, index_ticker: str) -> bool:
+def _is_trading_day(d: date, index_ticker: str, market_today: date) -> bool:
     if d.weekday() >= 5:
         return False
 
     try:
         import yfinance as yf
 
-        window_start = (d - timedelta(days=7)).isoformat()
-        window_end = (d + timedelta(days=1)).isoformat()
+        window_start = (d - timedelta(days=14)).isoformat()
+        window_end = (market_today + timedelta(days=1)).isoformat()
         df = yf.Ticker(index_ticker).history(
             start=window_start,
             end=window_end,
             interval="1d",
         )
-        if df.empty:
-            return False
-        return any(idx.date() == d for idx in df.index)
+        if not df.empty and any(idx.date() == d for idx in df.index):
+            return True
+        # Today's session may still be open or yfinance may lag — allow weekday briefings.
+        if d == market_today:
+            logger.info(
+                "No %s daily bar for %s yet — treating weekday as open",
+                index_ticker,
+                d.isoformat(),
+            )
+            return True
+        return False
     except Exception as exc:
         logger.warning(
             "Trading-day check failed for %s (%s) — falling back to weekday only",
@@ -68,11 +76,11 @@ def _is_trading_day(d: date, index_ticker: str) -> bool:
 
 
 def is_bist_trading_day(d: date) -> bool:
-    return _is_trading_day(d, _BIST_INDEX)
+    return _is_trading_day(d, _BIST_INDEX, today_turkey())
 
 
 def is_us_trading_day(d: date) -> bool:
-    return _is_trading_day(d, _US_INDEX)
+    return _is_trading_day(d, _US_INDEX, today_us_eastern())
 
 
 def is_trading_day(d: date, portfolio: Portfolio) -> bool:

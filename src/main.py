@@ -80,7 +80,8 @@ def _parse_args(argv: list[str]) -> tuple[MailType, Portfolio]:
 def run(mail_type: MailType, portfolio: Portfolio = "bist") -> None:
     ok, skip_reason = should_send_briefing(mail_type, portfolio)
     if not ok:
-        logger.info(skip_reason)
+        logger.warning(skip_reason)
+        print(f"::notice title=Briefing skipped::{skip_reason}")
         return
 
     tickers = _load_tickers(portfolio)

@@ -54,7 +54,9 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           TO_EMAIL_US: ${{ secrets.TO_EMAIL_US }}
-        run: python src/main.py ${{ github.event.inputs.mail_type }} usa
+        run: |
+          echo "US briefing: mail_type=${{ github.event.inputs.mail_type }} portfolio=usa"
+          python src/main.py ${{ github.event.inputs.mail_type }} usa
 
       - name: Save US state history
         if: success()
