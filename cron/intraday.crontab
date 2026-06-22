@@ -1,0 +1,8 @@
+# Stock Limit Briefing — optional LOCAL cron (macOS / Linux)
+#
+# Recommended: use GitHub Actions schedules instead (Mac can be off).
+# See .github/workflows/daily-briefing.yml
+#
+# If you still want local intraday as backup, uncomment:
+# PROJECT=/Users/Elifcik/Desktop/apps/Stock-limit-briefing
+# 0 14 * * 1-5 TZ=Europe/Istanbul $PROJECT/run.sh intraday >> $PROJECT/logs/cron-intraday.log 2>&1

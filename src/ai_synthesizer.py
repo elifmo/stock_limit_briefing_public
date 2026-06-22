@@ -7,6 +7,13 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 
+from state_history import (
+    build_change_summary,
+    format_status_change,
+    load_previous_snapshot,
+    save_snapshot,
+)
+
 logger = logging.getLogger(__name__)
 
 _REPORTS_DIR = Path(__file__).parent.parent / "reports"
@@ -59,7 +66,7 @@ _STATE_ICONS: dict[str, str] = {
     "No Clear Signal":     "➖",
 }
 
-MailType = Literal["morning", "evening"]
+MailType = Literal["morning", "evening", "intraday"]
 
 
 # ── Context formatter ─────────────────────────────────────────────────────────
@@ -205,7 +212,11 @@ def _parse_sections(text: str) -> tuple[str, str, str, str]:
 _MARKET_ORDER = ["TR", "NL", "USA", "CRYPTO"]
 
 _MARKET_HEADERS: dict[str, dict[str, str]] = {
-    "TR":     {"morning": "🇹🇷 TURKEY (Live — Open +1h)",       "evening": "🇹🇷 TURKEY (Close)"},
+    "TR":     {
+        "morning":  "🇹🇷 TURKEY (Live — Open +1h)",
+        "intraday": "🇹🇷 TURKEY (Live — Open +4h)",
+        "evening":  "🇹🇷 TURKEY (Close)",
+    },
     "NL":     {"morning": "🇳🇱 NETHERLANDS (Live — Open +1h)",  "evening": "🇳🇱 NETHERLANDS (Close)"},
     "USA":    {"morning": "🇺🇸 USA (Previous Close)",            "evening": "🇺🇸 USA (Live — Open +1h)"},
     "CRYPTO": {"morning": "🪙 CRYPTO (Live)",                    "evening": "🪙 CRYPTO (Live)"},
@@ -213,8 +224,9 @@ _MARKET_HEADERS: dict[str, dict[str, str]] = {
 
 # Markets showing live prices at each mail time
 _LIVE_MARKETS: dict[str, set[str]] = {
-    "morning": {"TR", "NL", "CRYPTO"},
-    "evening": {"USA", "CRYPTO"},
+    "morning":  {"TR", "NL", "CRYPTO"},
+    "intraday": {"TR"},
+    "evening":  {"USA", "CRYPTO"},
 }
 
 
@@ -234,6 +246,11 @@ def _currency(ticker: str) -> str:
     if ticker.endswith(".AS"):
         return "€"
     return "$"
+
+
+def _market_header(market: str, mail_type: MailType) -> str:
+    headers = _MARKET_HEADERS.get(market, {})
+    return headers.get(mail_type, headers.get("morning", market))
 
 
 def _group_by_market(classifications: dict) -> dict[str, list[str]]:
@@ -298,20 +315,41 @@ def _format_pap_block(pap: dict, cur: str) -> str:
 # ── Email block builder ───────────────────────────────────────────────────────
 
 
-def _two_column_signals(left_title: str, left_sigs: list[str],
-                        right_title: str, right_sigs: list[str],
-                        col_width: int = 38) -> list[str]:
-    """Render two signal lists side-by-side with a pipe separator."""
-    sep = "─" * col_width
-    header = f"{left_title:<{col_width}} | {right_title}"
-    divider = f"{sep} | {sep}"
-    n = max(len(left_sigs), len(right_sigs))
-    rows = [header, divider]
-    for i in range(n):
-        left  = left_sigs[i]  if i < len(left_sigs)  else ""
-        right = right_sigs[i] if i < len(right_sigs) else ""
-        rows.append(f"{left:<{col_width}} | {right}")
-    return rows
+def _format_signal_sections(sections: list[tuple[str, list[str]]]) -> list[str]:
+    """Render timeframe signal blocks stacked vertically for readable email layout."""
+    lines: list[str] = []
+    bar_width = 41
+
+    for i, (title, signals) in enumerate(sections):
+        if i > 0:
+            lines.append("")
+        underline = "─" * max(8, bar_width - len(title) - 3)
+        lines.append(f"── {title} {underline}")
+        if signals:
+            lines.extend(f"  {signal}" for signal in signals)
+        else:
+            lines.append("  ➖ No significant signals detected.")
+    return lines
+
+
+def _timeframe_sections(
+    mail_type: MailType,
+    hourly_ta: dict | None,
+    four_hour_ta: dict | None,
+    daily_ta: dict | None,
+) -> list[tuple[str, list[str]]]:
+    """Build ordered (title, signals) pairs for the active mail type."""
+    sections: list[tuple[str, list[str]]] = [
+        ("📊 SHORT-TERM (1H)", hourly_ta.get("signals", []) if hourly_ta else []),
+    ]
+    if mail_type == "intraday":
+        sections.append(
+            ("⏱ MID-TERM (4H)", four_hour_ta.get("signals", []) if four_hour_ta else [])
+        )
+    sections.append(
+        ("📈 LONG-TERM (Daily)", daily_ta.get("signals", []) if daily_ta else [])
+    )
+    return sections
 
 
 def build_ticker_section(
@@ -321,6 +359,7 @@ def build_ticker_section(
     client: anthropic.Anthropic,
     mail_type: MailType,
     live_prices: dict[str, float | None],
+    previous_snapshot: dict | None = None,
 ) -> str:
     state = classification["state"]
     confidence = classification["confidence"]
@@ -346,6 +385,7 @@ def build_ticker_section(
         price_line = None
 
     lines: list[str] = [f"{ticker} — {icon} {state}  ({confidence} confidence)"]
+    lines.append(format_status_change(ticker, classification, previous_snapshot))
 
     if price_line:
         lines.append(price_line)
@@ -358,15 +398,10 @@ def build_ticker_section(
 
     lines.append("")
 
-    # SHORT-TERM and LONG-TERM side by side
-    short_sigs = hourly_ta.get("signals", []) if hourly_ta else []
-    long_sigs  = daily_ta.get("signals", [])  if daily_ta  else []
-    if short_sigs or long_sigs:
-        lines.extend(_two_column_signals(
-            "📊 SHORT-TERM (1H)", short_sigs,
-            "📈 LONG-TERM (Daily)", long_sigs,
-        ))
-        lines.append("")
+    lines.extend(_format_signal_sections(
+        _timeframe_sections(mail_type, hourly_ta, four_hour_ta, daily_ta)
+    ))
+    lines.append("")
 
     # AGPro Stop Run
     has_4h_sr    = four_hour_ta and four_hour_ta.get("indicators") and four_hour_ta["indicators"].get("stop_run")
@@ -424,16 +459,20 @@ _SEP_THIN  = "─" * 41
 
 
 def _mail_label(mail_type: MailType) -> str:
-    return "Morning" if mail_type == "morning" else "Evening"
+    return {"morning": "Morning", "evening": "Evening", "intraday": "Intraday"}[mail_type]
 
 
 def _next_briefing(mail_type: MailType) -> str:
     if mail_type == "morning":
+        return "Next briefing: Intraday (Today, 14:00 Turkey)"
+    if mail_type == "intraday":
         return "Next briefing: Evening (Today)"
     return "Next briefing: Morning (Tomorrow)"
 
 
 def _time_label(mail_type: MailType) -> str:
+    if mail_type == "intraday":
+        return "Intraday (14:00 Turkey — BIST open +4h)"
     is_summer = bool(datetime.now(ZoneInfo("Europe/Amsterdam")).dst())
     if mail_type == "morning":
         return f"Morning ({'11:00' if is_summer else '12:00'} Turkey)"
@@ -446,6 +485,7 @@ def build_email_body(
     mail_type: MailType,
     client: anthropic.Anthropic,
     live_prices: dict[str, float | None],
+    previous_snapshot: dict | None = None,
 ) -> str:
     today = date.today().strftime("%B %d, %Y")
     label = _mail_label(mail_type)
@@ -459,6 +499,11 @@ def build_email_body(
         _SEP_THICK,
     ]
 
+    summary = build_change_summary(classifications, previous_snapshot)
+    if summary:
+        lines.append("")
+        lines.extend(summary)
+
     groups = _group_by_market(classifications)
 
     for market in _MARKET_ORDER:
@@ -467,7 +512,7 @@ def build_email_body(
             continue
 
         lines.append("")
-        lines.append(_MARKET_HEADERS[market][mail_type])
+        lines.append(_market_header(market, mail_type))
         lines.append(_SEP_THIN)
 
         for ticker in tickers:
@@ -476,7 +521,10 @@ def build_email_body(
                 continue
             try:
                 lines.append("")
-                lines.append(build_ticker_section(ticker, classification, ta_result, client, mail_type, live_prices))
+                lines.append(build_ticker_section(
+                    ticker, classification, ta_result, client, mail_type, live_prices,
+                    previous_snapshot,
+                ))
                 lines.append("")
                 lines.append(_SEP_THIN)
             except Exception as exc:
@@ -520,8 +568,12 @@ def run_synthesizer(
             sys.exit(1)
         client = anthropic.Anthropic(api_key=key)
 
-    body = build_email_body(classifications, ta_result, mail_type, client, live_prices or {})
+    previous_snapshot = load_previous_snapshot(mail_type)
+    body = build_email_body(
+        classifications, ta_result, mail_type, client, live_prices or {}, previous_snapshot,
+    )
     path = save_briefing(body, mail_type)
+    save_snapshot(classifications, mail_type)
     logger.info("Briefing saved: %s", path)
     return path
 

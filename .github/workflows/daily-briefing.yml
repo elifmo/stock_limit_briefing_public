@@ -2,13 +2,25 @@ on:
   workflow_dispatch:
     inputs:
       mail_type:
-        description: "morning or evening"
+        description: "morning, intraday, or evening"
         required: true
         default: "morning"
         type: choice
         options:
           - morning
+          - intraday
           - evening
+  schedule:
+    # All times UTC. Turkey = UTC+3 (fixed, no DST).
+    # Morning:  11:00 TRT summer / 12:00 TRT winter (Amsterdam DST)
+    - cron: "0 8 * * 1-5"    # 11:00 Turkey — summer morning
+    - cron: "0 9 * * 1-5"    # 12:00 Turkey — winter morning
+    # Intraday: 14:00 TRT always (BIST open +4h)
+    - cron: "0 11 * * 1-5"
+    # Evening: 18:45 TRT summer / 19:45 TRT winter
+    - cron: "45 15 * * 1-5" # summer evening
+    - cron: "45 16 * * 1-5"  # winter evening
+
 jobs:
   send-briefing:
     runs-on: ubuntu-latest
@@ -16,26 +28,58 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve mail type
+        id: mail
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          MAIL_TYPE_INPUT: ${{ github.event.inputs.mail_type }}
+          GITHUB_SCHEDULE: ${{ github.event.schedule }}
+        run: bash scripts/resolve_github_mail.sh
+
       - name: Set up Python
+        if: steps.mail.outputs.mail_type != ''
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
       - name: Install dependencies
+        if: steps.mail.outputs.mail_type != ''
         run: pip install -r requirements.txt
 
       - name: Create tickers config
+        if: steps.mail.outputs.mail_type != ''
         run: |
           mkdir -p config
           cat > config/tickers.yaml << 'EOF'
           ${{ secrets.TICKERS_YAML }}
           EOF
 
+      - name: Restore state history
+        if: steps.mail.outputs.mail_type != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            reports/snapshot_history.json
+            reports/last_snapshot.json
+          key: briefing-state-${{ github.run_id }}
+          restore-keys: |
+            briefing-state-
+
       - name: Run briefing
+        if: steps.mail.outputs.mail_type != ''
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
-        run: python src/main.py ${{ github.event.inputs.mail_type }}
+        run: python src/main.py ${{ steps.mail.outputs.mail_type }}
+
+      - name: Save state history
+        if: steps.mail.outputs.mail_type != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            reports/snapshot_history.json
+            reports/last_snapshot.json
+          key: briefing-state-${{ github.run_id }}

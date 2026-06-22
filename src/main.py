@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from ai_synthesizer import run_synthesizer
 from data_fetcher import fetch_4h_data, fetch_hourly_data, fetch_live_prices, fetch_ticker_data
 from mail_sender import send_briefing
+from market_calendar import should_send_briefing
 from state_classifier import classify_all_tickers
 from ta_engine import run_ta_engine
 
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = Path(__file__).parent.parent / "config" / "tickers.yaml"
 
-MailType = Literal["morning", "evening"]
+MailType = Literal["morning", "evening", "intraday"]
 
 
 def _load_tickers() -> list[str]:
@@ -46,6 +47,11 @@ def _detect_mail_type() -> MailType:
 
 
 def run(mail_type: MailType) -> None:
+    ok, skip_reason = should_send_briefing(mail_type)
+    if not ok:
+        logger.info(skip_reason)
+        return
+
     tickers = _load_tickers()
     logger.info("Tickers: %s", tickers)
     logger.info("Mail type: %s", mail_type)
@@ -83,7 +89,7 @@ def run(mail_type: MailType) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("morning", "evening"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("morning", "evening", "intraday"):
         mail_type: MailType = sys.argv[1]  # type: ignore[assignment]
     else:
         mail_type = _detect_mail_type()
