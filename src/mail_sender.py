@@ -32,15 +32,19 @@ def _body_without_subject(body: str) -> str:
 # ── Sender ────────────────────────────────────────────────────────────────────
 
 
-def send_briefing(report_path: Path) -> None:
+def send_briefing(report_path: Path, portfolio: str = "bist") -> None:
     gmail_user = os.environ.get("GMAIL_USER")
     app_password = os.environ.get("GMAIL_APP_PASSWORD")
-    to_email = os.environ.get("TO_EMAIL")
+
+    if portfolio == "usa":
+        to_email = os.environ.get("TO_EMAIL_US", "cemelifozkan@gmail.com")
+    else:
+        to_email = os.environ.get("TO_EMAIL")
 
     missing = [k for k, v in {
         "GMAIL_USER": gmail_user,
         "GMAIL_APP_PASSWORD": app_password,
-        "TO_EMAIL": to_email,
+        "TO_EMAIL" if portfolio != "usa" else "TO_EMAIL_US": to_email,
     }.items() if not v]
 
     if missing:

@@ -12,7 +12,7 @@ on:
           - evening
 
 jobs:
-  send-briefing:
+  send-us-briefing:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -27,36 +27,33 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Create tickers config
+      - name: Create US tickers config
         run: |
           mkdir -p config
-          cat > config/tickers.yaml << 'EOF'
-          ${{ secrets.TICKERS_YAML }}
+          cat > config/tickers_us.yaml << 'EOF'
+          ${{ secrets.TICKERS_US_YAML }}
           EOF
 
-      - name: Restore state history
+      - name: Restore US state history
         uses: actions/cache/restore@v4
         with:
-          path: |
-            reports/snapshot_history.json
-            reports/last_snapshot.json
-          key: briefing-state-bist-${{ github.run_id }}
+          path: reports/snapshot_history_usa.json
+          key: briefing-state-us-${{ github.run_id }}
           restore-keys: |
-            briefing-state-bist-
+            briefing-state-us-
 
-      - name: Run briefing
+      - name: Run US briefing
         env:
+          PORTFOLIO: usa
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          TO_EMAIL: ${{ secrets.TO_EMAIL }}
-        run: python src/main.py ${{ github.event.inputs.mail_type }}
+          TO_EMAIL_US: ${{ secrets.TO_EMAIL_US }}
+        run: python src/main.py ${{ github.event.inputs.mail_type }} usa
 
-      - name: Save state history
+      - name: Save US state history
         uses: actions/cache/save@v4
         if: always()
         with:
-          path: |
-            reports/snapshot_history.json
-            reports/last_snapshot.json
-          key: briefing-state-bist-${{ github.run_id }}
+          path: reports/snapshot_history_usa.json
+          key: briefing-state-us-${{ github.run_id }}

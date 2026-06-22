@@ -3,6 +3,7 @@
 
 # Personal watchlist and project context — keep private
 config/tickers.yaml
+config/tickers_us.yaml
 CLAUDE.md
 
 # Virtual environment

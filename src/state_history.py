@@ -5,12 +5,11 @@ from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from market_calendar import today_turkey
+from market_calendar import Portfolio, today_for_portfolio
 
 logger = logging.getLogger(__name__)
 
 _REPORTS_DIR = Path(__file__).parent.parent / "reports"
-_HISTORY_PATH = _REPORTS_DIR / "snapshot_history.json"
 _LEGACY_PATH = _REPORTS_DIR / "last_snapshot.json"
 _MAX_SNAPSHOTS = 50
 
@@ -33,23 +32,36 @@ _STATE_RANK: dict[str, int] = {
 }
 
 
+def _history_path(portfolio: Portfolio) -> Path:
+    if portfolio == "usa":
+        return _REPORTS_DIR / "snapshot_history_usa.json"
+    return _REPORTS_DIR / "snapshot_history.json"
+
+
+def _timezone_for_portfolio(portfolio: Portfolio) -> ZoneInfo:
+    if portfolio == "usa":
+        return ZoneInfo("America/New_York")
+    return ZoneInfo("Europe/Istanbul")
+
+
 def _snap_date(snapshot: dict) -> date:
     if trading_date := snapshot.get("trading_date"):
         return date.fromisoformat(trading_date)
     return datetime.fromisoformat(snapshot["saved_at"]).date()
 
 
-def _load_history() -> list[dict]:
+def _load_history(portfolio: Portfolio) -> list[dict]:
+    history_path = _history_path(portfolio)
     snapshots: list[dict] = []
 
-    if _HISTORY_PATH.exists():
+    if history_path.exists():
         try:
-            data = json.loads(_HISTORY_PATH.read_text(encoding="utf-8"))
+            data = json.loads(history_path.read_text(encoding="utf-8"))
             snapshots = data.get("snapshots", [])
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Could not load snapshot history: %s", exc)
 
-    if not snapshots and _LEGACY_PATH.exists():
+    if not snapshots and portfolio == "bist" and _LEGACY_PATH.exists():
         try:
             snapshots = [json.loads(_LEGACY_PATH.read_text(encoding="utf-8"))]
         except (json.JSONDecodeError, OSError) as exc:
@@ -65,19 +77,12 @@ def _find_latest_evening_before(day: date, history: list[dict]) -> dict | None:
     return None
 
 
-def load_previous_snapshot(mail_type: MailType) -> dict | None:
-    """Load the best comparison snapshot for the current mail type.
-
-  Morning (incl. Monday / post-holiday): last market close = most recent Evening
-  from a prior trading day.
-  Intraday: same-day Morning, else last close (Evening).
-  Evening: same-day Intraday, else same-day Morning, else last close (Evening).
-    """
-    history = _load_history()
+def load_previous_snapshot(mail_type: MailType, portfolio: Portfolio = "bist") -> dict | None:
+    history = _load_history(portfolio)
     if not history:
         return None
 
-    today = today_turkey()
+    today = today_for_portfolio(portfolio)
 
     if mail_type == "morning":
         return _find_latest_evening_before(today, history)
@@ -100,12 +105,17 @@ def load_previous_snapshot(mail_type: MailType) -> dict | None:
     return None
 
 
-def save_snapshot(classifications: dict[str, dict], mail_type: MailType) -> None:
-    """Append current classifications to rolling history."""
+def save_snapshot(
+    classifications: dict[str, dict],
+    mail_type: MailType,
+    portfolio: Portfolio = "bist",
+) -> None:
+    tz = _timezone_for_portfolio(portfolio)
     snapshot = {
-        "saved_at": datetime.now(ZoneInfo("Europe/Istanbul")).isoformat(),
-        "trading_date": today_turkey().isoformat(),
+        "saved_at": datetime.now(tz).isoformat(),
+        "trading_date": today_for_portfolio(portfolio).isoformat(),
         "mail_type": mail_type,
+        "portfolio": portfolio,
         "tickers": {
             ticker: {
                 "state": c["state"],
@@ -118,16 +128,17 @@ def save_snapshot(classifications: dict[str, dict], mail_type: MailType) -> None
         },
     }
 
-    history = _load_history()
+    history = _load_history(portfolio)
     history.insert(0, snapshot)
     history = history[:_MAX_SNAPSHOTS]
 
+    history_path = _history_path(portfolio)
     _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    _HISTORY_PATH.write_text(
+    history_path.write_text(
         json.dumps({"snapshots": history}, indent=2),
         encoding="utf-8",
     )
-    logger.info("State snapshot saved (%s, %s)", mail_type, _HISTORY_PATH)
+    logger.info("State snapshot saved (%s %s, %s)", portfolio, mail_type, history_path)
 
 
 def _change_direction(previous_state: str, current_state: str) -> str:
@@ -148,15 +159,13 @@ def _direction_suffix(direction: str) -> str:
     return {"improved": " — improved", "worsened": " — caution", "shifted": ""}[direction]
 
 
-def _comparison_label(previous_snapshot: dict) -> str:
-    """Human label for what we compared against."""
+def _comparison_label(previous_snapshot: dict, portfolio: Portfolio) -> str:
     prev_mail = _MAIL_LABELS.get(previous_snapshot.get("mail_type", ""), "last briefing")
     snap_date = _snap_date(previous_snapshot)
-    today = today_turkey()
+    today = today_for_portfolio(portfolio)
     gap_days = (today - snap_date).days
 
     if gap_days > 1 or (gap_days == 1 and today.weekday() == 0):
-        # Monday morning vs Friday, or any multi-day gap (holiday)
         day_label = snap_date.strftime("%a %d %b")
         return f"last close ({prev_mail}, {day_label})"
 
@@ -167,6 +176,7 @@ def format_status_change(
     ticker: str,
     classification: dict,
     previous_snapshot: dict | None,
+    portfolio: Portfolio = "bist",
 ) -> str:
     if previous_snapshot is None:
         return "📌 Status: First briefing — nothing to compare yet"
@@ -175,7 +185,7 @@ def format_status_change(
     if previous is None:
         return "📌 Status: New in watchlist — no previous briefing"
 
-    compare_label = _comparison_label(previous_snapshot)
+    compare_label = _comparison_label(previous_snapshot, portfolio)
     prev_state = previous["state"]
     curr_state = classification["state"]
 
@@ -198,11 +208,12 @@ def format_status_change(
 def build_change_summary(
     classifications: dict[str, dict],
     previous_snapshot: dict | None,
+    portfolio: Portfolio = "bist",
 ) -> list[str]:
     if previous_snapshot is None:
         return []
 
-    compare_label = _comparison_label(previous_snapshot)
+    compare_label = _comparison_label(previous_snapshot, portfolio)
     changed: list[tuple[str, str, str, str]] = []
 
     for ticker, current in classifications.items():

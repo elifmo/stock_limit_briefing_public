@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 
+from market_calendar import Portfolio
 from state_history import (
     build_change_summary,
     format_status_change,
@@ -209,8 +210,6 @@ def _parse_sections(text: str) -> tuple[str, str, str, str]:
 
 # ── Market detection & grouping ───────────────────────────────────────────────
 
-_MARKET_ORDER = ["TR", "NL", "USA", "CRYPTO"]
-
 _MARKET_HEADERS: dict[str, dict[str, str]] = {
     "TR":     {
         "morning":  "🇹🇷 TURKEY (Live — Open +1h)",
@@ -218,16 +217,35 @@ _MARKET_HEADERS: dict[str, dict[str, str]] = {
         "evening":  "🇹🇷 TURKEY (Close)",
     },
     "NL":     {"morning": "🇳🇱 NETHERLANDS (Live — Open +1h)",  "evening": "🇳🇱 NETHERLANDS (Close)"},
-    "USA":    {"morning": "🇺🇸 USA (Previous Close)",            "evening": "🇺🇸 USA (Live — Open +1h)"},
+    "USA":    {
+        "morning":  "🇺🇸 USA (Live — Open +1h)",
+        "intraday": "🇺🇸 USA (Live — Open +4h)",
+        "evening":  "🇺🇸 USA (Close)",
+    },
     "CRYPTO": {"morning": "🪙 CRYPTO (Live)",                    "evening": "🪙 CRYPTO (Live)"},
 }
 
-# Markets showing live prices at each mail time
-_LIVE_MARKETS: dict[str, set[str]] = {
+# Markets showing live prices at each mail time (BIST portfolio)
+_LIVE_MARKETS_BIST: dict[str, set[str]] = {
     "morning":  {"TR", "NL", "CRYPTO"},
     "intraday": {"TR"},
     "evening":  {"USA", "CRYPTO"},
 }
+
+# US portfolio — USA stocks only
+_LIVE_MARKETS_USA: dict[str, set[str]] = {
+    "morning":  {"USA"},
+    "intraday": {"USA"},
+    "evening":  set(),
+}
+
+_MARKET_ORDER_BIST = ["TR", "NL", "USA", "CRYPTO"]
+_MARKET_ORDER_USA = ["USA"]
+
+
+def _live_markets(mail_type: MailType, portfolio: Portfolio) -> set[str]:
+    table = _LIVE_MARKETS_USA if portfolio == "usa" else _LIVE_MARKETS_BIST
+    return table.get(mail_type, set())
 
 
 def _detect_market(ticker: str) -> str:
@@ -253,8 +271,13 @@ def _market_header(market: str, mail_type: MailType) -> str:
     return headers.get(mail_type, headers.get("morning", market))
 
 
-def _group_by_market(classifications: dict) -> dict[str, list[str]]:
-    groups: dict[str, list[str]] = {m: [] for m in _MARKET_ORDER}
+def _market_order(portfolio: Portfolio) -> list[str]:
+    return _MARKET_ORDER_USA if portfolio == "usa" else _MARKET_ORDER_BIST
+
+
+def _group_by_market(classifications: dict, portfolio: Portfolio = "bist") -> dict[str, list[str]]:
+    order = _market_order(portfolio)
+    groups: dict[str, list[str]] = {m: [] for m in order}
     for ticker in classifications:
         market = _detect_market(ticker)
         groups.setdefault(market, []).append(ticker)
@@ -360,6 +383,7 @@ def build_ticker_section(
     mail_type: MailType,
     live_prices: dict[str, float | None],
     previous_snapshot: dict | None = None,
+    portfolio: Portfolio = "bist",
 ) -> str:
     state = classification["state"]
     confidence = classification["confidence"]
@@ -374,7 +398,7 @@ def build_ticker_section(
 
     market = _detect_market(ticker)
     cur = _currency(ticker)
-    is_live = market in _LIVE_MARKETS[mail_type]
+    is_live = market in _live_markets(mail_type, portfolio)
     live_price = live_prices.get(ticker) if is_live else None
 
     if live_price is not None:
@@ -385,7 +409,7 @@ def build_ticker_section(
         price_line = None
 
     lines: list[str] = [f"{ticker} — {icon} {state}  ({confidence} confidence)"]
-    lines.append(format_status_change(ticker, classification, previous_snapshot))
+    lines.append(format_status_change(ticker, classification, previous_snapshot, portfolio))
 
     if price_line:
         lines.append(price_line)
@@ -462,7 +486,13 @@ def _mail_label(mail_type: MailType) -> str:
     return {"morning": "Morning", "evening": "Evening", "intraday": "Intraday"}[mail_type]
 
 
-def _next_briefing(mail_type: MailType) -> str:
+def _next_briefing(mail_type: MailType, portfolio: Portfolio = "bist") -> str:
+    if portfolio == "usa":
+        if mail_type == "morning":
+            return "Next briefing: Intraday (Today, 13:30 ET)"
+        if mail_type == "intraday":
+            return "Next briefing: Evening (Today, 16:15 ET)"
+        return "Next briefing: Morning (Tomorrow, 10:30 ET)"
     if mail_type == "morning":
         return "Next briefing: Intraday (Today, 14:00 Turkey)"
     if mail_type == "intraday":
@@ -470,13 +500,27 @@ def _next_briefing(mail_type: MailType) -> str:
     return "Next briefing: Morning (Tomorrow)"
 
 
-def _time_label(mail_type: MailType) -> str:
+def _time_label(mail_type: MailType, portfolio: Portfolio = "bist") -> str:
+    if portfolio == "usa":
+        if mail_type == "morning":
+            return "Morning (10:30 ET — Open +1h)"
+        if mail_type == "intraday":
+            return "Intraday (13:30 ET — Open +4h)"
+        return "Evening (16:15 ET — Close)"
     if mail_type == "intraday":
         return "Intraday (14:00 Turkey — BIST open +4h)"
     is_summer = bool(datetime.now(ZoneInfo("Europe/Amsterdam")).dst())
     if mail_type == "morning":
         return f"Morning ({'11:00' if is_summer else '12:00'} Turkey)"
     return f"Evening ({'18:45' if is_summer else '19:45'} Turkey)"
+
+
+def _briefing_title(portfolio: Portfolio) -> str:
+    return "US STOCK BRIEFING" if portfolio == "usa" else "STOCK LIMIT BRIEFING"
+
+
+def _subject_prefix(portfolio: Portfolio) -> str:
+    return "US Stock Briefing" if portfolio == "usa" else "Stock Limit Briefing"
 
 
 def build_email_body(
@@ -486,27 +530,29 @@ def build_email_body(
     client: anthropic.Anthropic,
     live_prices: dict[str, float | None],
     previous_snapshot: dict | None = None,
+    portfolio: Portfolio = "bist",
 ) -> str:
     today = date.today().strftime("%B %d, %Y")
     label = _mail_label(mail_type)
 
     lines: list[str] = [
-        f"Subject: Stock Limit Briefing — {date.today().strftime('%B %d')}, {label}",
+        f"Subject: {_subject_prefix(portfolio)} — {date.today().strftime('%B %d')}, {label}",
         "",
         _SEP_THICK,
-        "📊 STOCK LIMIT BRIEFING",
-        f"{today} — {_time_label(mail_type)}",
+        f"📊 {_briefing_title(portfolio)}",
+        f"{today} — {_time_label(mail_type, portfolio)}",
         _SEP_THICK,
     ]
 
-    summary = build_change_summary(classifications, previous_snapshot)
+    summary = build_change_summary(classifications, previous_snapshot, portfolio)
     if summary:
         lines.append("")
         lines.extend(summary)
 
-    groups = _group_by_market(classifications)
+    groups = _group_by_market(classifications, portfolio)
+    market_order = _market_order(portfolio)
 
-    for market in _MARKET_ORDER:
+    for market in market_order:
         tickers = groups.get(market, [])
         if not tickers:
             continue
@@ -523,7 +569,7 @@ def build_email_body(
                 lines.append("")
                 lines.append(build_ticker_section(
                     ticker, classification, ta_result, client, mail_type, live_prices,
-                    previous_snapshot,
+                    previous_snapshot, portfolio,
                 ))
                 lines.append("")
                 lines.append(_SEP_THIN)
@@ -533,7 +579,7 @@ def build_email_body(
         lines.append(_SEP_THICK)
 
     lines.append("")
-    lines.append(_next_briefing(mail_type))
+    lines.append(_next_briefing(mail_type, portfolio))
 
     return "\n".join(lines)
 
@@ -541,9 +587,10 @@ def build_email_body(
 # ── File saver ────────────────────────────────────────────────────────────────
 
 
-def save_briefing(body: str, mail_type: MailType) -> Path:
+def save_briefing(body: str, mail_type: MailType, portfolio: Portfolio = "bist") -> Path:
     _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"{date.today().isoformat()}-{mail_type}.txt"
+    suffix = f"-{portfolio}" if portfolio != "bist" else ""
+    filename = f"{date.today().isoformat()}-{mail_type}{suffix}.txt"
     path = _REPORTS_DIR / filename
     path.write_text(body, encoding="utf-8")
     return path
@@ -557,6 +604,7 @@ def run_synthesizer(
     classifications: dict[str, dict],
     mail_type: MailType,
     live_prices: dict[str, float | None] | None = None,
+    portfolio: Portfolio = "bist",
 ) -> Path:
     try:
         client = anthropic.Anthropic()
@@ -568,12 +616,13 @@ def run_synthesizer(
             sys.exit(1)
         client = anthropic.Anthropic(api_key=key)
 
-    previous_snapshot = load_previous_snapshot(mail_type)
+    previous_snapshot = load_previous_snapshot(mail_type, portfolio)
     body = build_email_body(
-        classifications, ta_result, mail_type, client, live_prices or {}, previous_snapshot,
+        classifications, ta_result, mail_type, client, live_prices or {},
+        previous_snapshot, portfolio,
     )
-    path = save_briefing(body, mail_type)
-    save_snapshot(classifications, mail_type)
+    path = save_briefing(body, mail_type, portfolio)
+    save_snapshot(classifications, mail_type, portfolio)
     logger.info("Briefing saved: %s", path)
     return path
 
