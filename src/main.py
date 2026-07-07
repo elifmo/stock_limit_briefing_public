@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from ai_synthesizer import run_synthesizer
 from data_fetcher import fetch_4h_data, fetch_hourly_data, fetch_live_prices, fetch_ticker_data
+from kap_fetcher import fetch_kap_for_tickers
 from mail_sender import send_briefing
 from market_calendar import Portfolio, should_send_briefing
 from state_classifier import classify_all_tickers
@@ -112,8 +113,15 @@ def run(mail_type: MailType, portfolio: Portfolio = "bist") -> None:
     logger.info("Classifying market states...")
     classifications = classify_all_tickers(all_analysis)
 
+    kap_by_ticker: dict[str, list] = {}
+    if portfolio == "bist":
+        logger.info("Fetching KAP disclosures...")
+        kap_by_ticker = fetch_kap_for_tickers(tickers)
+
     logger.info("Synthesizing briefing...")
-    report_path = run_synthesizer(ta_result, classifications, mail_type, live_prices, portfolio)
+    report_path = run_synthesizer(
+        ta_result, classifications, mail_type, live_prices, portfolio, kap_by_ticker,
+    )
 
     logger.info("Sending email...")
     send_briefing(report_path, portfolio)

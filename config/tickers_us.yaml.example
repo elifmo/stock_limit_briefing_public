@@ -1,6 +1,20 @@
 tickers:
+  - UUP
+  - SPY
+  - PL
+  - LUNR
+  - PLTR
+  - OKLO
+  - SMR
+  - ASTS
+  - INTC
+  - TSM
+  - MRVL
+  - LRCX
+  - MU
+  - AVGO
   - NVDA
-  - AAPL
-  - MSFT
-  - GOOGL
-  - AMZN
+  - RKLB
+  - RDW
+  - HOOD
+  - COIN
