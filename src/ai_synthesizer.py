@@ -292,6 +292,7 @@ def _english_labels(portfolio: Portfolio) -> dict[str, str]:
         "srp_title": "SRP — Stop Run Planner (4H)",
         "pap_title": "PAP — Price Acceptance Profile (Daily)",
         "kap_title": "KAP (today)",
+        "kap_alert_title": "⚠️ KAP today — new disclosures on your watchlist:",
         "kap_none": "No disclosure today.",
         "kap_more": "more items",
         "no_signals": "Nothing big to report.",
@@ -329,6 +330,7 @@ def _labels(portfolio: Portfolio, lang: Lang = "tr") -> dict[str, str]:
             "srp_title": "SRP — Stop Run Planner (4 Saat)",
             "pap_title": "PAP — Fiyat Kabul Profili (Günlük)",
             "kap_title": "KAP (bugün)",
+            "kap_alert_title": "⚠️ KAP bugün — takip listende yeni bildirim:",
             "kap_none": "Bugün bildirim yok.",
             "kap_more": "bildirim daha",
             "no_signals": "Belirgin sinyal yok.",
@@ -1140,15 +1142,39 @@ def _build_change_summary_localized(
     return lines
 
 
+def _build_kap_alert_summary(
+    kap_by_ticker: dict[str, list[KapNewsItem]] | None,
+    portfolio: Portfolio,
+    lang: Lang = "tr",
+) -> list[str]:
+    """Top-of-mail KAP alert — only when at least one ticker has disclosures."""
+    if portfolio != "bist" or not kap_by_ticker:
+        return []
+
+    alerts: list[tuple[str, list[KapNewsItem]]] = [
+        (ticker, items)
+        for ticker, items in sorted(kap_by_ticker.items())
+        if items
+    ]
+    if not alerts:
+        return []
+
+    L = _labels(portfolio, lang)
+    lines = [L["kap_alert_title"]]
+    for ticker, items in alerts:
+        latest = items[0]
+        extra = f" (+{len(items) - 1} more)" if len(items) > 1 else ""
+        line = f"  • {ticker} — {latest.time} {latest.subject}{extra}"
+        lines.append(line)
+    return lines
+
+
 # ── Ticker block ──────────────────────────────────────────────────────────────
 
 
 def _format_kap_block(items: list[KapNewsItem], portfolio: Portfolio, lang: Lang = "tr") -> list[str]:
     L = _labels(portfolio, lang)
     lines = [f"📰 {L['kap_title']}:"]
-    if not items:
-        lines.append(f"  ➖ {L['kap_none']}")
-        return lines
     for item in items:
         lines.append(f"  • {item.time} — {item.subject}")
         if item.summary:
@@ -1218,9 +1244,9 @@ def build_ticker_section(
             f"{L['resistance']}: {cur}{sr['nearest_resistance']:.2f}"
         )
 
-    if portfolio == "bist" and ticker.endswith(".IS"):
+    if portfolio == "bist" and ticker.endswith(".IS") and kap_news:
         lines.append("")
-        lines.extend(_format_kap_block(kap_news or [], portfolio, lang))
+        lines.extend(_format_kap_block(kap_news, portfolio, lang))
 
     lines.append("")
     lines.extend(_format_signal_sections(
@@ -1332,6 +1358,11 @@ def build_email_body(
     if summary:
         lines.append("")
         lines.extend(summary)
+
+    kap_alert = _build_kap_alert_summary(kap_by_ticker, portfolio, lang)
+    if kap_alert:
+        lines.append("")
+        lines.extend(kap_alert)
 
     groups = _group_by_market(classifications, portfolio)
     market_order = _market_order(portfolio)
